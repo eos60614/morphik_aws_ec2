@@ -1,7 +1,6 @@
 version: '3.8'
 
 x-ollama-check: &ollama-check
-  # This command reads the toml file and checks if any provider is set to "ollama"
   command: >
     /bin/sh -c '
     grep -q "provider *= *\"ollama\"" morphik.toml &&
@@ -16,9 +15,22 @@ services:
     <<: *ollama-check
 
   morphik:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile.gpu
+    runtime: nvidia
     ports:
       - "8000:8000"
+    deploy:
+      resources:
+        limits:
+          cpus: '4.0'          # ALL CPU cores
+          memory: 12G          # Most of the RAM
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
     environment:
       - JWT_SECRET_KEY=${JWT_SECRET_KEY:-your-secret-key-here}
       - POSTGRES_URI=postgresql+asyncpg://morphik:morphik@postgres:5432/morphik
@@ -28,11 +40,17 @@ services:
       - LOG_LEVEL=DEBUG
       - REDIS_HOST=redis
       - REDIS_PORT=6379
+      - NVIDIA_VISIBLE_DEVICES=all
+      - CUDA_VISIBLE_DEVICES=0
+      - OMP_NUM_THREADS=4
+      - MKL_NUM_THREADS=4
+      - TOKENIZERS_PARALLELISM=true
     volumes:
       - ./storage:/app/storage
       - ./logs:/app/logs
       - ./morphik.toml:/app/morphik.toml
       - huggingface_cache:/root/.cache/huggingface
+      - /tmp:/tmp  # Use instance store for temp files
     depends_on:
       postgres:
         condition: service_healthy
@@ -51,8 +69,19 @@ services:
   worker:
     build:
       context: .
-      dockerfile: dockerfile
+      dockerfile: Dockerfile.gpu
+    runtime: nvidia
     command: arq core.workers.ingestion_worker.WorkerSettings
+    deploy:
+      resources:
+        limits:
+          cpus: '3.5'          # Most CPU cores
+          memory: 8G           # Generous RAM
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
     environment:
       - JWT_SECRET_KEY=${JWT_SECRET_KEY:-your-secret-key-here}
       - POSTGRES_URI=postgresql+asyncpg://morphik:morphik@postgres:5432/morphik
@@ -60,11 +89,17 @@ services:
       - LOG_LEVEL=DEBUG
       - REDIS_HOST=redis
       - REDIS_PORT=6379
+      - NVIDIA_VISIBLE_DEVICES=all
+      - CUDA_VISIBLE_DEVICES=0
+      - OMP_NUM_THREADS=3
+      - MKL_NUM_THREADS=3
+      - TOKENIZERS_PARALLELISM=true
     volumes:
       - ./storage:/app/storage
       - ./logs:/app/logs
       - ./morphik.toml:/app/morphik.toml
       - huggingface_cache:/root/.cache/huggingface
+      - /tmp:/tmp  # Use instance store for temp files
     depends_on:
       postgres:
         condition: service_healthy
@@ -84,9 +119,14 @@ services:
     image: redis:7-alpine
     ports:
       - "6379:6379"
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1G
     volumes:
       - redis_data:/data
-    command: redis-server --appendonly yes
+    command: redis-server --appendonly yes --maxmemory 800mb --maxmemory-policy allkeys-lru
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -99,12 +139,19 @@ services:
     build:
       context: .
       dockerfile: postgres.dockerfile
-    shm_size: 128mb
+    shm_size: 256mb  # Increased shared memory
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 3G
     environment:
       - POSTGRES_USER=morphik
       - POSTGRES_PASSWORD=morphik
       - POSTGRES_DB=morphik
       - PGDATA=/var/lib/postgresql/data/pgdata
+      # PostgreSQL performance tuning
+      - POSTGRES_INITDB_ARGS=--auth-host=scram-sha-256
     ports:
       - "5432:5432"
     volumes:
@@ -117,16 +164,44 @@ services:
       start_period: 10s
     networks:
       - morphik-network
+    command: >
+      postgres
+      -c shared_buffers=512MB
+      -c effective_cache_size=2GB
+      -c maintenance_work_mem=256MB
+      -c checkpoint_completion_target=0.9
+      -c wal_buffers=16MB
+      -c default_statistics_target=100
+      -c random_page_cost=1.1
+      -c effective_io_concurrency=200
 
   ollama:
     image: ollama/ollama:latest
+    runtime: nvidia
     profiles:
       - ollama
     ports:
       - "11434:11434"
+    deploy:
+      resources:
+        limits:
+          cpus: '4.0'          # ALL CPU cores when active
+          memory: 10G          # Large memory for big models
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - CUDA_VISIBLE_DEVICES=0
+      - OLLAMA_HOST=0.0.0.0
+      - OLLAMA_ORIGINS="*"
+      - OLLAMA_MAX_LOADED_MODELS=2  # Can load multiple models
     volumes:
       - ollama_data:/root/.ollama
       - ./ollama-entrypoint.sh:/ollama-entrypoint.sh
+      - /tmp:/tmp  # Use instance store for temp
     networks:
       - morphik-network
     entrypoint: ["/ollama-entrypoint.sh"]

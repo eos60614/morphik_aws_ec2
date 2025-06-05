@@ -1,0 +1,81 @@
+FROM nvidia/cuda:12.1-devel-ubuntu22.04
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    python3.11 \
+    python3.11-dev \
+    python3-pip \
+    python3.11-venv \
+    ninja-build \
+    build-essential \
+    git \
+    wget \
+    curl \
+    htop \
+    && rm -rf /var/lib/apt/lists/*
+
+# Set Python 3.11 as default
+RUN ln -sf /usr/bin/python3.11 /usr/bin/python3
+RUN ln -sf /usr/bin/python3.11 /usr/bin/python
+
+# Upgrade pip
+RUN python3 -m pip install --upgrade pip
+
+# Install ninja and verify
+RUN pip3 install ninja packaging wheel setuptools
+RUN ninja --version
+
+# Install PyTorch first (CRITICAL: Must be before flash-attn)
+RUN pip3 install torch==2.4.1 torchvision==0.19.1 torchaudio==2.4.1 --index-url https://download.pytorch.org/whl/cu121
+
+# Verify PyTorch works
+RUN python3 -c "import torch; print(f'PyTorch: {torch.__version__}'); print(f'CUDA available: {torch.cuda.is_available()}')"
+
+# MAXIMUM PERFORMANCE: Use ALL resources for compilation
+ENV MAX_JOBS=4
+ENV TORCH_CUDA_ARCH_LIST="8.0;8.6;8.9"
+ENV NVCC_PREPEND_FLAGS="-ccbin gcc"
+ENV MAKEFLAGS="-j4"
+ENV CMAKE_BUILD_PARALLEL_LEVEL=4
+ENV CUDA_LAUNCH_BLOCKING=0
+ENV TORCH_COMPILE_DEBUG=0
+
+# Install flash-attn with maximum parallel compilation
+RUN echo "Compiling flash-attn with ALL CPU cores..." && \
+    pip3 install flash-attn==2.7.4.post1 --no-build-isolation --verbose || \
+    pip3 install flash-attn==2.6.3 --no-build-isolation --verbose || \
+    pip3 install flash-attn==2.5.9 --no-build-isolation --verbose || \
+    echo "Flash-attn installation failed, continuing without it"
+
+# Copy and install Morphik requirements
+COPY requirements.txt .
+RUN pip3 install -r requirements.txt
+
+# Install additional dependencies for better compatibility
+RUN pip3 install transformers>=4.36.0 accelerate>=0.25.0
+
+# Copy application code
+COPY . /app
+WORKDIR /app
+
+# Create necessary directories
+RUN mkdir -p /app/storage /app/logs
+
+# Set environment variables for MAXIMUM performance
+ENV PYTHONPATH=/app
+ENV CUDA_VISIBLE_DEVICES=0
+ENV TRANSFORMERS_CACHE=/app/.cache/huggingface
+ENV OMP_NUM_THREADS=4
+ENV MKL_NUM_THREADS=4
+ENV TOKENIZERS_PARALLELISM=true
+ENV HF_HUB_CACHE=/app/.cache/huggingface
+
+# Expose port
+EXPOSE 8000
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD curl -f http://localhost:8000/health || exit 1
+
+# Start command
+CMD ["python", "start_server.py"]
