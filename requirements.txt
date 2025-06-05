@@ -148,11 +148,11 @@ jupyter_core==5.7.2
 jusText==3.0.1
 keyring==25.5.0
 kiwisolver==1.4.5
-langchain==0.2.17
-langchain-community==0.2.17
-langchain-core==0.2.43
-langchain-openai==0.1.25
-langchain-text-splitters==0.2.4
+langchain>=0.3,<0.4
+langchain-community>=0.3,<0.4
+langchain-core>=0.3,<0.4
+langchain-openai>=0.2,<0.3
+langchain-text-splitters>=0.3,<0.4
 langdetect==1.0.9
 langsmith==0.1.147
 lap==0.5.12
